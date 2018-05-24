@@ -25,9 +25,6 @@
                                                    (define hash2-proc (lambda (s rhash) (equal-secondary-hash-code (compiled-name s))))))
 (struct addr (a) #:transparent)
 (struct stack (ι κ) #:transparent)
-(struct ctx (e d-proc n) #:transparent ; (e-app d-proc n)
- #:property prop:custom-write (lambda (v p w?)
-                                 (fprintf p "<ctx ~v ~v>" (ctx-e v) (ctx-n v))))
 (struct ev (e ρ ι κ) #:transparent)
 (struct ko (d ι κ) #:transparent)
 (struct system (initial graph duration) #:transparent)
@@ -82,17 +79,17 @@
 
   (define (store-alloc! a d)
     (if (hash-has-key? σ a) 
-        (let* ((current (hash-ref σ a ⊥))
+        (let* ((current (hash-ref σ a))
                (updated (⊔ current d)))
           (set! C (hash-set C a (add1 (hash-ref C a))))
           (unless (equal? current updated)
             (set! σ (hash-set σ a updated))
-            (set! S (set))
+            (set! S (set)) 
             ))
         (begin
           (set! C (hash-set C a 1))
           (set! σ (hash-set σ a d))
-          (set! S (set))
+          (set! S (set)) 
           )
         ))
           
@@ -104,7 +101,8 @@
                         (⊔ current d))))
       (unless (equal? current updated)
         (set! σ (hash-set σ a updated))
-        (set! S (set)))))
+        (set! S (set)) 
+        )))
 
   (define (alloc-literal! e)
     (if (pair? e)
@@ -134,7 +132,7 @@
       ((ev («letrec» _ e-id e-init e-body) ρ ι κ)
        (let* ((a (alloc e-id κ))
               (ρ* (hash-set ρ («id»-x e-id) a)))
-       (set (ev e-init ρ* (cons (letreck a e-body ρ*) ι) κ))))
+         (set (ev e-init ρ* (cons (letreck a e-body ρ*) ι) κ))))
       ((ev («if» _ e-cond e-true e-false) ρ ι κ)
        (let ((d-cond (atom-eval e-cond ρ)))
          (set-union (if (true? d-cond) (set (ev e-true ρ ι κ)) (set))
@@ -225,6 +223,19 @@
           (store-alloc! a (α (cons (car d-rands) (cadr d-rands))))
           (set (α (addr a))))))
 
+    (define-native-prim! "list"
+      (lambda (e-app κ d-rands)
+        (let ((e-rands («app»-aes e-app)))
+          (set (list-alloc-helper! d-rands e-rands κ)))))
+
+    (define (list-alloc-helper! d-rands e-rands κ)
+      (if (null? d-rands)
+          (α '())
+          (let ((d-cdr (list-alloc-helper! (cdr d-rands) (cdr e-rands) κ)))
+            (let ((a (alloc (car e-rands) κ)))
+              (store-alloc! a (α (cons (car d-rands) d-cdr)))
+              (α (addr a))))))
+
     (define-native-prim! "car"
       (lambda (_ __ d-rands)
         (set (for/fold ((d ⊥)) ((a (in-set (γ (car d-rands)))) #:when (addr? a))
@@ -253,6 +264,17 @@
               (store-update! (addr-a a) (α (cons (car w) d)))))
           (set (α 'undefined)))))
 
+    (define-native-prim! "pair?"
+      (lambda (_ __ d-rands)
+        (let ((d (for/fold ((d ⊥)) ((w (in-set (γ (car d-rands)))))
+                   (match w
+                     ((addr a)
+                      (for/fold ((d d)) ((ww (in-set (γ (store-lookup a)))))
+                        (⊔ d (α (pair? ww)))))
+                     (_
+                      (⊔ d (α #f)))))))
+          (set d))))
+    
     (define-native-prim! "eq?"
       (lambda (_ __ d-rands)
         (set (for*/fold ((d ⊥)) ((w1 (γ (car d-rands))) (w2 (γ (cadr d-rands))))
@@ -300,6 +322,12 @@
          (let ((x (cdr p)))
            (car x))))
 
+    (define-compile-prim! "caddr"
+      '(lambda (p)
+         (let ((x (cdr p)))
+           (let ((y (cdr x)))
+             (car y)))))
+
     (define-compile-prim! "member"
       '(lambda (v lst)
          (let ((c (null? lst)))
@@ -328,7 +356,7 @@
 
     (define-prims! (free e))
     (ev e ρ0 '() #f))
-    
+  
   (define (explore! W)
     (unless (set-empty? W)
       (let ((s (set-first W)))
@@ -369,15 +397,17 @@
       ((ko _ _ (cons rator _)) (set-member? Compiled rator))
       (_ #f)))
 
-  (define t-start (current-milliseconds))
-  (let ((s0 (inject! e)))
-    (explore! (set s0))
-    (let ((t-prune-start (current-milliseconds)))
-      (let ((g* (prune s0 g compiled-state?))) ; TODO: prune Ξ
-        (let ((prune-duration (- (current-milliseconds) t-prune-start)))
-          (printf "pruned in ~v ms\n" prune-duration)
-          (let ((duration (- (current-milliseconds) t-start)))
-            (system s0 g* duration)))))))
+  (let ((t-start (current-milliseconds)))
+    (let ((s0 (inject! e)))
+      (explore! (set s0))
+      (let ((t-end (current-milliseconds)))
+        (let ((t-prune-start (current-milliseconds)))
+          (let ((g* (prune s0 g compiled-state?))) ; TODO: prune Ξ
+            (let ((t-prune-end (current-milliseconds)))
+              (let ((prune-duration (- t-prune-end t-prune-start)))
+                (let ((duration (- t-prune-end t-start)))
+                  (printf "exploration ~v ms; pruning ~v ms\n" (- t-end t-start) (- t-prune-end t-prune-start))
+                  (system s0 g* duration))))))))))
 
 (define (end-states g)
   (for/set (((from tos) (in-hash g)) #:when (set-empty? tos))
@@ -441,12 +471,15 @@
 (type-eval
  (compile
 
+  ;'(let ((l '(list 1 2 3)))
+  ;   (pair? l))
+
   ;'(let ((v '(1 2)))
   ;   (let ((w '(2 2)))
   ;     (equal? v w)))
 
-  '(let ((p '(1 2 3 4)))
-     (member 8 p))
+ ;'(let ((p '(1 2 3 4)))
+ ;   (member 8 p))
      
 ;'(letrec ((f (lambda (x) (* x x)))) (f 4))
   
@@ -454,9 +487,9 @@
  ;    (let ((z (set-car! p 123)))
  ;      (car p)))
   
- ;(file->value "test/churchnums.scm")
+ (file->value "test/deriv.scm")
 
-  ))
+  )) 
 
 
 ;(conc-eval
@@ -465,13 +498,3 @@
 ;               (let ((c (= y 2)))
 ;                 (let ((z (if c (set! x 2) (set! x 3))))
 ;                   (+ x y)))))))
-
-
-
-;;; INTERESTING CASE is when the update exp of a set! can be non-atomic: first encountered set! when walking back is not the right one!
-;;;; THEREFORE: we only allow aes as update exps
-;;;(test '(let ((x 123)) (let ((y (set! x (set! x 456)))) x)) 'undefined)
-;;;(test '(let ((x 123)) (let ((y (set! x (let ((u (set! x 456))) 789)))) x)) 789)
-
-;;; SCHEME ERROR when setting before init
-;;; (test '(letrec ((x (let ((u (set! x 123))) 456))) x) 456)
